@@ -1,0 +1,1224 @@
+cd src
+g++ -o main.exe main.cpp SpotifyDataset.cpp StatDesc.cpp Artist.cpp StatInfer.cpp
+./main.exe
+
+\documentclass[a4paper, 12pt]{report}
+ 
+
+Artist.h
+
+#pragma once
+#include <string>
+
+/*
+  Représente un artiste Spotify et ses métriques agrégées.
+
+  Champs (tous en double pour rester cohérent avec les valeurs décimales du CSV) :
+    - name       : nom de l'artiste
+    - streams    : total de streams
+    - daily      : moyenne/score journalier (interprétation selon la source)
+    - asLead     : streams en tant qu'artiste principal (lead)
+    - solo       : streams en solo
+    - asFeature  : streams en tant qu'artiste invité (feature)
+*/
+class Artist {
+private:
+    std::string name;
+    double streams;
+    double daily;
+    double asLead;
+    double solo;
+    double asFeature;
+
+public:
+    // Constructeur : initialise tous les champs
+    Artist(const std::string& name, double streams, double daily, double asLead, double solo, double asFeature);
+
+    // Getters (accesseurs en lecture uniquement)
+    const std::string& getName() const;
+    double getStreams() const;
+    double getDaily() const;
+    double getAsLead() const;
+    double getSolo() const;
+    double getAsFeature() const;
+};
+
+Artist.cpp
+
+#include "Artist.h"
+
+// Constructeur : simple affectation des membres via liste d'initialisation
+Artist::Artist(const std::string& name, double streams, double daily, double asLead, double solo, double asFeature)
+    : name(name), streams(streams), daily(daily), asLead(asLead), solo(solo), asFeature(asFeature) {}
+
+// Getters : renvoient les valeurs stockées, sans copie inutile
+const std::string& Artist::getName() const {
+    return name;
+}
+
+double Artist::getStreams() const {
+    return streams;
+}
+
+double Artist::getDaily() const {
+    return daily;
+}
+
+double Artist::getAsLead() const {
+    return asLead;
+}
+
+double Artist::getSolo() const {
+    return solo;
+}
+
+double Artist::getAsFeature() const {
+    return asFeature;
+}
+
+SpotifyDataset.h
+
+#pragma once
+#include "Artist.h"
+#include <vector>
+#include <string>
+
+class SpotifyDataset {
+private:
+    std::vector<Artist> artists;
+
+    // Outils de parsing
+    static std::string trim(const std::string& s);
+    static std::string normalizeKey(const std::string& s); // "As lead" -> "aslead"
+    static std::vector<std::string> parseCSVLine(const std::string& line); // RFC 4180
+
+    struct ColMap {
+        int artist = -1;
+        int streams = -1;
+        int daily = -1;
+        int asLead = -1;
+        int solo = -1;
+        int asFeature = -1;
+        bool complete() const {
+            return artist>=0 && streams>=0 && daily>=0 && asLead>=0 && solo>=0 && asFeature>=0;
+        }
+    };
+    // Déduit le mapping depuis la première ligne; isHeader=true si noms reconnus
+    static ColMap buildColumnMap(const std::vector<std::string>& firstRow, bool& isHeader);
+
+    // Conversion texte -> double avec gestion milliers et virgule décimale
+    double parseNumber(const std::string& str, int linenumber) const;
+
+public:
+    // Charge les données depuis un CSV. Renvoie true si le fichier s'ouvre (même si des lignes sont ignorées).
+    bool loadFromCSV(const std::string& filename);
+
+    const std::vector<Artist>& getArtists() const;
+
+    // "streams", "daily", "solo", "aslead"/"as_lead", "asfeature"/"as_feature"
+    std::vector<double> getAttribute(const std::string& attr) const;
+};
+
+SpotifyDataset.cpp
+
+#include "SpotifyDataset.h"
+#include <fstream>
+#include <sstream>
+#include <iostream>
+#include <algorithm>
+#include <cctype>
+
+// ----------- Helpers -----------
+
+std::string SpotifyDataset::trim(const std::string& s) {
+    auto is_space = [](unsigned char c) {
+        return std::isspace(c) || c == '\r' || c == '\n';
+    };
+    size_t b = 0, e = s.size();
+    while (b < e && is_space((unsigned char)s[b])) ++b;
+    while (e > b && is_space((unsigned char)s[e-1])) --e;
+    return s.substr(b, e - b);
+}
+
+std::string SpotifyDataset::normalizeKey(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        if (std::isalnum(c)) out.push_back((char)std::tolower(c));
+        // on ignore espaces, underscores, tirets, etc.
+    }
+    return out;
+}
+
+// Parser CSV conforme RFC 4180 (guillemets, "" -> ").
+std::vector<std::string> SpotifyDataset::parseCSVLine(const std::string& line) {
+    std::vector<std::string> fields;
+    std::string cur;
+    bool inQuotes = false;
+
+    for (size_t i = 0; i < line.size(); ++i) {
+        char ch = line[i];
+        if (ch == '"') {
+            if (inQuotes && i + 1 < line.size() && line[i + 1] == '"') {
+                // guillemet échappé
+                cur.push_back('"');
+                ++i;
+            } else {
+                inQuotes = !inQuotes;
+            }
+        } else if (ch == ',' && !inQuotes) {
+            fields.push_back(trim(cur));
+            cur.clear();
+        } else {
+            cur.push_back(ch);
+        }
+    }
+    fields.push_back(trim(cur));
+    return fields;
+}
+
+// Mappe les colonnes depuis la première ligne si c'est un header.
+// Heuristique: si >=3 noms reconnus, on considère que c'est un header.
+SpotifyDataset::ColMap SpotifyDataset::buildColumnMap(const std::vector<std::string>& firstRow, bool& isHeader) {
+    ColMap map;
+    int recognized = 0;
+    for (int i = 0; i < (int)firstRow.size(); ++i) {
+        std::string key = normalizeKey(firstRow[i]);
+
+        if (key == "artist" || key == "name") { map.artist = i; recognized++; }
+        else if (key == "streams" || key == "stream") { map.streams = i; recognized++; }
+        else if (key == "daily") { map.daily = i; recognized++; }
+        else if (key == "aslead" || key == "lead" || key == "asprincipal") { map.asLead = i; recognized++; }
+        else if (key == "solo") { map.solo = i; recognized++; }
+        else if (key == "asfeature" || key == "feature" || key == "feat") { map.asFeature = i; recognized++; }
+    }
+    isHeader = (recognized >= 3);
+    return map;
+}
+
+// ----------- Parsing numérique robuste -----------
+
+double SpotifyDataset::parseNumber(const std::string& s, int linenumber) const {
+    std::string sanitized = trim(s);
+
+    // Valeur vide -> on retourne 0.0 (choix: ignorer la ligne si vous préférez)
+    if (sanitized.empty()) return 0.0;
+
+    // Retirer les espaces internes typiques de groupement "60 000"
+    sanitized.erase(std::remove_if(sanitized.begin(), sanitized.end(),
+        [](unsigned char c){ return c==' ' || c=='\t'; }), sanitized.end());
+
+    bool hasDot = sanitized.find('.') != std::string::npos;
+    bool hasComma = sanitized.find(',') != std::string::npos;
+
+    if (hasComma && !hasDot) {
+        // S'il n'y a qu'une virgule et aucun point: on suppose virgule décimale (locale fr)
+        if (std::count(sanitized.begin(), sanitized.end(), ',') == 1) {
+            std::replace(sanitized.begin(), sanitized.end(), ',', '.');
+        } else {
+            // Plusieurs virgules: on suppose séparateurs de milliers -> on les enlève
+            sanitized.erase(std::remove(sanitized.begin(), sanitized.end(), ','), sanitized.end());
+        }
+    } else if (hasComma && hasDot) {
+        // Les virgules sont probablement des séparateurs de milliers
+        sanitized.erase(std::remove(sanitized.begin(), sanitized.end(), ','), sanitized.end());
+    }
+    // Sinon: ni virgule ni point -> entier "pur"
+
+    try {
+        // Laisse std::stod faire l'analyse (gère +/-, notation expo, etc.)
+        size_t idx = 0;
+        double val = std::stod(sanitized, &idx);
+        // Vérifier qu'il n'y a pas de traînant non numérique significatif
+        // (on tolère des espaces déjà retirés)
+        if (idx < sanitized.size()) {
+            // caractères restants -> log et exception
+            std::cerr << "Avertissement ligne " << linenumber
+                      << ": caractères inattendus dans '" << s << "'\n";
+        }
+        return val;
+    } catch (const std::exception&) {
+        std::cerr << "Erreur à la ligne " << linenumber << ": Valeur non numérique : '" << s << "'\n";
+        throw;
+    }
+}
+
+// ----------- Chargement du CSV -----------
+
+bool SpotifyDataset::loadFromCSV(const std::string& filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) return false;
+
+    artists.clear();
+
+    std::string line;
+    int lineNumber = 0;
+    int imported = 0, skipped = 0;
+
+    auto processRow = [&](const std::vector<std::string>& row, int lineno, const ColMap& map) -> bool {
+        auto safeGet = [&](int idx) -> std::string {
+            return (idx >= 0 && idx < (int)row.size()) ? row[idx] : std::string();
+        };
+
+        // Champs requis minimaux: nom + toutes les colonnes numériques
+        if (map.artist < 0 || map.streams < 0 || map.daily < 0 ||
+            map.asLead < 0 || map.solo < 0 || map.asFeature < 0) {
+            std::cerr << "Ligne " << lineno << " ignorée: mapping de colonnes incomplet\n";
+            return false;
+        }
+
+        try {
+            std::string name = trim(safeGet(map.artist));
+            if (name.empty()) {
+                std::cerr << "Ligne " << lineno << " ignorée: nom d'artiste vide\n";
+                return false;
+            }
+
+            double streams   = parseNumber(safeGet(map.streams), lineno);
+            double daily     = parseNumber(safeGet(map.daily), lineno);
+            double asLead    = parseNumber(safeGet(map.asLead), lineno);
+            double solo      = parseNumber(safeGet(map.solo), lineno);
+            double asFeature = parseNumber(safeGet(map.asFeature), lineno);
+
+            artists.emplace_back(name, streams, daily, asLead, solo, asFeature);
+            return true;
+        } catch (...) {
+            // parseNumber a déjà loggé; on ignore la ligne
+            return false;
+        }
+    };
+
+    // Lire première ligne
+    if (!std::getline(file, line)) {
+        std::cerr << "Fichier vide.\n";
+        return true; // fichier ouvert mais vide
+    }
+    lineNumber++;
+    auto firstRow = parseCSVLine(line);
+
+    bool isHeader = false;
+    ColMap map = buildColumnMap(firstRow, isHeader);
+
+    // Fallback: si pas header, mapping par positions fixes
+    if (!isHeader) {
+        map.artist = 0;
+        map.streams = 1;
+        map.daily = 2;
+        map.asLead = 3;
+        map.solo = 4;
+        map.asFeature = 5;
+
+        // Traiter la première ligne comme données
+        if ((int)firstRow.size() >= 6) {
+            if (processRow(firstRow, lineNumber, map)) imported++; else skipped++;
+        } else {
+            std::cerr << "Ligne " << lineNumber << " ignorée: nombre de colonnes insuffisant (" << firstRow.size() << ")\n";
+            skipped++;
+        }
+    } else {
+        // Header: si mapping incomplet, on tentera quand même par positions fixes en secours
+        if (!map.complete()) {
+            ColMap pos;
+            pos.artist = 0; pos.streams = 1; pos.daily = 2; pos.asLead = 3; pos.solo = 4; pos.asFeature = 5;
+            // On utilisera 'map' pour l'accès par nom; si une colonne manque (=-1), on essaiera 'pos'
+            // en fusionnant dynamiquement dans processRow. Pour rester simple ici, on garde 'map' tel quel
+            // et on loguera "mapping incomplet" si manquant.
+        }
+    }
+
+    // Parcours des lignes restantes
+    while (std::getline(file, line)) {
+        lineNumber++;
+        auto row = parseCSVLine(line);
+
+        // Si la ligne est visiblement vide
+        bool allEmpty = true;
+        for (auto& f : row) { if (!trim(f).empty()) { allEmpty = false; break; } }
+        if (allEmpty) continue;
+
+        if ((int)row.size() < 2) { // moins que 2 colonnes -> clairement corrompue
+            std::cerr << "Ligne " << lineNumber << " ignorée: trop peu de colonnes (" << row.size() << ")\n";
+            skipped++; continue;
+        }
+
+        if (!processRow(row, lineNumber, map)) skipped++; else imported++;
+    }
+
+    std::cerr << "Import CSV terminé: " << imported << " ligne(s) importée(s), "
+              << skipped << " ignorée(s). Total artistes: " << artists.size() << "\n";
+    return true;
+}
+
+// ----------- Accès -----------
+
+const std::vector<Artist>& SpotifyDataset::getArtists() const {
+    return artists;
+}
+
+std::vector<double> SpotifyDataset::getAttribute(const std::string& attr) const {
+    std::vector<double> v;
+    for (const Artist& a : artists) {
+        if      (attr == "streams")                             v.push_back(a.getStreams());
+        else if (attr == "daily")                               v.push_back(a.getDaily());
+        else if (attr == "solo")                                v.push_back(a.getSolo());
+        else if (attr == "aslead" || attr == "as_lead")         v.push_back(a.getAsLead());
+        else if (attr == "asfeature" || attr == "as_feature")   v.push_back(a.getAsFeature());
+    }
+    return v;
+}
+
+StatDesc.h
+
+#pragma once
+#include "Artist.h"
+#include <vector>
+#include <string>
+
+/*
+  StatDesc : statistiques descriptives et classements sur des vecteurs numériques
+  et sur le vecteur d'artistes.
+*/
+class StatDesc {
+public:
+    // Moyenne arithmétique
+    static double mean(const std::vector<double>& data);
+
+    // Médiane (copie et tri du vecteur)
+    static double median(std::vector<double> data);
+
+    // Mode(s) : renvoie tous les modes (valeurs les plus fréquentes)
+    static std::vector<double> mode(const std::vector<double>& data);
+
+    // Minimum/Maximum (0.0 si data vide)
+    static double min(const std::vector<double>& data);
+    static double max(const std::vector<double>& data);
+	
+    //Amplitude
+    static double amplitude(const std::vector<double>& data);
+
+    // Variance : si sample=true, divise par (n-1), sinon par n
+    static double variance(const std::vector<double>& data, bool sample=true);
+
+    // Ecart-type : racine de la variance
+    static double stddev(const std::vector<double>& data, bool sample=true);
+
+    // Retourne les N premiers artistes selon un attribut (ordre décroissant)
+    // attr: "streams", "daily", "solo", "aslead"/"as_lead", "asfeature"/"as_feature"
+    static std::vector<Artist> topN(const std::vector<Artist>& artists, int n, const std::string& attr);
+
+    // Classement par plus grand écart absolu entre asLead et asFeature
+    static std::vector<Artist> topGapLeadFeature(const std::vector<Artist>& artists, int n);
+
+    // Affichage du % de solo et % de feature par artiste (sur le total de l'artiste)
+    static void printSoloFeatureRatio(const std::vector<Artist>& artists);
+
+    // Affichage de la répartition globale (sur la somme de tous les streams du dataset)
+    static void printGlobalSoloFeatureRatio(const std::vector<Artist>& artists);
+};
+
+StatDesc.cpp
+
+#include "StatDesc.h"
+#include <algorithm>
+#include <map>
+#include <cmath>
+#include <iostream>
+#include <iomanip>
+
+// --- MOYENNE ---
+// Somme / n, renvoie 0.0 si data est vide.
+double StatDesc::mean(const std::vector<double>& data) {
+    double sum = 0.0;
+    for (double x : data) sum += x;
+    return data.empty() ? 0.0 : sum / data.size();
+}
+
+// --- MEDIANE ---
+// Trie une copie du vecteur puis renvoie l'élément central (ou moyenne des deux centraux)
+double StatDesc::median(std::vector<double> data) {
+    if (data.empty()) return 0.0;
+    std::sort(data.begin(), data.end());
+    size_t n = data.size();
+    if (n % 2 == 0) return (data[n/2 - 1] + data[n/2]) / 2.0;
+    else return data[n/2];
+}
+
+// --- MODE ---
+// Compte les fréquences avec std::map, puis récupère la ou les valeurs de fréquence max
+std::vector<double> StatDesc::mode(const std::vector<double>& data) {
+    std::map<double, int> freq;
+    for (double x : data) freq[x]++;
+    int maxFreq = 0;
+    for (const auto& p : freq)
+        if (p.second > maxFreq) maxFreq = p.second;
+
+    std::vector<double> modes;
+    for (const auto& p : freq)
+        if (p.second == maxFreq) modes.push_back(p.first);
+
+    return modes;
+}
+
+// --- MIN ---
+double StatDesc::min(const std::vector<double>& data) {
+    if (data.empty()) return 0.0;
+    return *std::min_element(data.begin(), data.end());
+}
+
+// --- MAX ---
+double StatDesc::max(const std::vector<double>& data) {
+    if (data.empty()) return 0.0;
+    return *std::max_element(data.begin(), data.end());
+}
+
+// --- AMPLITUDE ---
+double StatDesc::amplitude(const std::vector<double>& data) {
+    if (data.empty()) return 0.0;
+    auto mm = std::minmax_element(data.begin(), data.end());
+    return *mm.second - *mm.first;
+}
+
+// --- VARIANCE ---
+// Somme des (x-m)^2, divisée par (n-1) si sample=true, sinon par n.
+// Si data.size()<2 -> 0.0
+double StatDesc::variance(const std::vector<double>& data, bool sample) {
+    if (data.size() < 2) return 0.0;
+    double m = mean(data);
+    double var = 0.0;
+    for (double x : data) var += (x-m)*(x-m);
+    return var / (data.size() - (sample ? 1 : 0));
+}
+
+// --- ECART-TYPE ---
+// Racine carrée de la variance
+double StatDesc::stddev(const std::vector<double>& data, bool sample) {
+    return std::sqrt(variance(data, sample));
+}
+
+// --- TOP N ---
+// Copie le vecteur d'artistes, trie selon l'attribut demandé (ordre décroissant), puis prend les N premiers.
+// Si attr est inconnu, av et bv restent à 0 -> l'ordre résultant sera arbitraire.
+std::vector<Artist> StatDesc::topN(const std::vector<Artist>& artists, int n, const std::string& attr) {
+    std::vector<Artist> sorted = artists;
+    std::sort(sorted.begin(), sorted.end(), [attr](const Artist& a, const Artist& b) {
+        double av = 0, bv = 0;
+        if      (attr == "streams")    { av=a.getStreams();    bv=b.getStreams();}
+        else if (attr == "daily")      { av=a.getDaily();      bv=b.getDaily();}
+        else if (attr == "solo")       { av=a.getSolo();       bv=b.getSolo();}
+        else if (attr == "aslead" || attr == "as_lead")   { av=a.getAsLead();     bv=b.getAsLead();}
+        else if (attr == "asfeature" || attr == "as_feature") { av=a.getAsFeature(); bv=b.getAsFeature();}
+        return av > bv; // Trie du plus grand au plus petit
+    });
+    if (n > (int)sorted.size()) n = sorted.size();
+    return std::vector<Artist>(sorted.begin(), sorted.begin() + n);
+}
+
+// --- TOP GAP LEAD/FEATURE ---
+// Classe les artistes selon l'écart absolu entre asLead et asFeature
+std::vector<Artist> StatDesc::topGapLeadFeature(const std::vector<Artist>& artists, int n) {
+    std::vector<std::pair<double, const Artist*>> byGap;
+    for(const Artist& a : artists)
+        byGap.push_back({std::abs(a.getAsLead()-a.getAsFeature()), &a});
+    std::sort(byGap.begin(), byGap.end(), [](const auto& x, const auto& y){
+        return x.first > y.first;
+    });
+    std::vector<Artist> res;
+    for(int i=0; i<n && i<(int)byGap.size(); ++i) res.push_back(*byGap[i].second);
+    return res;
+}
+
+// --- AFFICHAGE : ratio solo/feature par artiste ---
+// Pour chaque artiste : affiche %solo et %feature, basés sur le total de streams de l'artiste.
+void StatDesc::printSoloFeatureRatio(const std::vector<Artist>& artists) {
+    std::cout << std::fixed << std::setprecision(2);
+    std::cout << "Artiste                  %solo   %feature\n";
+    std::cout << "------------------------------------------------\n";
+    for (const Artist& a : artists) {
+        double total = a.getStreams();
+        if (total == 0.0) continue; // éviter division par 0
+        double psolo = 100.0 * a.getSolo() / total;
+        double pfeat = 100.0 * a.getAsFeature() / total;
+        std::cout << std::setw(22) << std::left << a.getName()
+                  << std::setw(8) << psolo 
+                  << std::setw(8) << pfeat << '\n';
+    }
+}
+
+// --- AFFICHAGE : répartition globale ---
+// Calcule les % sur la somme globale des streams (solo, feature, autre = reste)
+void StatDesc::printGlobalSoloFeatureRatio(const std::vector<Artist>& artists) {
+    double total = 0.0, solo = 0.0, feature = 0.0;
+    for(const Artist& a : artists) {
+        total += a.getStreams();
+        solo += a.getSolo();
+        feature += a.getAsFeature();
+    }
+    if (total == 0.0) {
+        std::cout << "Aucune donnée.\n"; return;
+    }
+    double psolo = 100.0 * solo / total;
+    double pfeat = 100.0 * feature / total;
+    std::cout << std::fixed << std::setprecision(2);
+    std::cout << "Répartition globale des streams:\n";
+    std::cout << "% solo: " << psolo << "\n";
+    std::cout << "% feature: " << pfeat << "\n";
+    std::cout << "Autre: " << (100.0 - psolo - pfeat) << "\n";
+}
+
+StatInfer.h
+
+#pragma once
+#include "Artist.h"
+#include <vector>
+#include <string>
+#include <unordered_set>
+
+/*
+  StatInfer : fonctions d'inférence/statistiques (probabilités simples,
+  intervalles de confiance, tests, régression, corrélation).
+  Remarque : les implémentations sont volontairement simples/approximatives.
+*/
+class StatInfer {
+public:
+    // PROBABILITÉS (approches simplifiées)
+    static double probaTopN(const std::vector<Artist>&, int n, const std::string& attr);
+    static double probaParSoloRatio(const std::vector<Artist>&, double seuilRatio);
+    static double probaCondTopNdaily_given_highStreams(const std::vector<Artist>&, double seuilStreams, int n);
+
+    // ESTIMATIONS (IC 95% approximatifs)
+    static double intervalleConfianceMoyenne(const std::vector<double>&, double alpha=0.05);
+    static double intervalleConfianceProportion(int nbSuccess, int nbTotal, double alpha=0.05);
+
+    // TESTS (t-test, test de proportion) – renvoient la statistique de test
+    static double ttest2moyennes(const std::vector<double>&, const std::vector<double>&);
+    static double testProportion(int nbSuccess, int nbTotal, double prop0);
+
+    // RÉGRESSION LINÉAIRE (Y = aX + b) + coefficient de détermination R²
+    static void regressionLineaire(const std::vector<double>& X, const std::vector<double>& Y, double& a, double& b, double& r2);
+
+    // CORRÉLATION DE PEARSON
+    static double pearson(const std::vector<double>&, const std::vector<double>&);
+
+    // TRACE ASCII d'une régression (nuage + droite ajustée)
+    static void regressionAsciiPlot(const std::vector<double>& X, const std::vector<double>& Y, double a, double b, int width=60, int height=20);
+};
+
+
+StatInfer.cpp
+
+#include "StatInfer.h"
+#include <algorithm>
+#include <cmath>
+#include <iostream>
+
+// --- Probabilité d’être dans le top N selon attr ---
+// Implémentation très simplifiée : renvoie n / total, indépendamment de l'attribut.
+// Cela représente une proba uniforme si on suppose qu'un artiste choisi au hasard a
+// une chance n/total d'être dans le top N. Ce n'est pas une estimation empirique.
+double StatInfer::probaTopN(const std::vector<Artist>& artists, int n, const std::string& attr) {
+    n = std::min(n, (int)artists.size());
+    return n / (double)artists.size();
+}
+
+// --- Proba qu’un artiste ait un ratio solo > seuil ---
+// On parcourt les artistes et on compte ceux dont (solo/streams) > seuilRatio.
+double StatInfer::probaParSoloRatio(const std::vector<Artist>& artists, double seuilRatio) {
+    int count = 0;
+    for(const Artist& a: artists) {
+        double soloRatio = (a.getStreams() == 0) ? 0 : (a.getSolo() / a.getStreams());
+        if(soloRatio > seuilRatio) count++;
+    }
+    return artists.empty() ? 0.0 : (count / (double)artists.size());
+}
+
+// --- Proba conditionnelle : être top N en daily parmi les artistes dont streams > seuilStreams ---
+// Logique : on filtre les artistes (streams > seuil), on trie ce sous-ensemble par daily,
+// puis on renvoie n / (taille du sous-ensemble).
+double StatInfer::probaCondTopNdaily_given_highStreams(const std::vector<Artist>& artists, double seuilStreams, int n) {
+if (artists.empty()) return 0.0;
+// 1) Pointeurs vers tous les artistes pour trier par daily (global)
+std::vector<const Artist*> all;
+all.reserve(artists.size());
+for (const Artist& a : artists) all.push_back(&a);
+
+std::sort(all.begin(), all.end(),
+          [](const Artist* a, const Artist* b){ return a->getDaily() > b->getDaily(); });
+
+if (n > (int)all.size()) n = (int)all.size();
+
+// 2) Ensemble du top-N global par daily
+std::unordered_set<const Artist*> topDaily;
+for (int i = 0; i < n; ++i) topDaily.insert(all[i]);
+
+// 3) Filtrer par streams > seuil
+std::vector<const Artist*> filtered;
+for (const Artist& a : artists)
+    if (a.getStreams() > seuilStreams) filtered.push_back(&a);
+
+if (filtered.empty()) return 0.0;
+
+// 4) Proportion des filtrés qui appartiennent au top-N global daily
+int countInTop = 0;
+for (const Artist* p : filtered)
+    if (topDaily.count(p)) countInTop++;
+
+return countInTop / (double)filtered.size();
+}
+
+// --- IC sur la moyenne (approx. gaussienne, 95% -> z=1.96) ---
+// Renvoie la demi-largeur de l'IC : mean ± demiLargeur
+double StatInfer::intervalleConfianceMoyenne(const std::vector<double>& data, double alpha) {
+    double m = 0.0, sq = 0.0;
+    int n = data.size();
+    if(n < 2) return 0.0;
+    for(double x : data) m += x; 
+    m = m / n;
+    for(double x : data) sq += (x-m)*(x-m);
+    double s = std::sqrt(sq/(n-1));
+    double z = 1.96; // alpha=0.05 (approx). Pour petits n, une loi t serait plus adaptée.
+    return z * s / std::sqrt(n); // Demi-largeur
+}
+
+// --- IC sur une proportion (approx. normale) ---
+// Renvoie la demi-largeur : p̂ ± demiLargeur
+double StatInfer::intervalleConfianceProportion(int nbSuccess, int nbTotal, double alpha) {
+    if(nbTotal == 0) return 0.0;
+    double p = nbSuccess/(double)nbTotal;
+    double z = 1.96; // alpha=0.05
+    return z * std::sqrt(p * (1 - p) / nbTotal);
+}
+
+// --- t-test (deux moyennes, écart-type empirique) ---
+// Calcul du t de Welch (sans p-value).
+double StatInfer::ttest2moyennes(const std::vector<double>& X, const std::vector<double>& Y) {
+    int n1 = X.size(), n2 = Y.size();
+    if(n1 < 2 || n2 < 2) return 0.0;
+    double m1=0, m2=0, s1=0, s2=0;
+    for(double x : X) m1 += x; m1 /= n1;
+    for(double y : Y) m2 += y; m2 /= n2;
+    for(double x:X) s1+=(x-m1)*(x-m1);
+    for(double y:Y) s2+=(y-m2)*(y-m2);
+    s1 = std::sqrt(s1/(n1-1));
+    s2 = std::sqrt(s2/(n2-1));
+    double t = (m1-m2)/std::sqrt((s1*s1)/n1 + (s2*s2)/n2);
+    return t; // La p-value n'est pas calculée ici
+}
+
+// --- z-test de proportion ---
+// Statistique z = (p̂ - p0) / sqrt(p0*(1-p0)/n)
+double StatInfer::testProportion(int nbSucc, int nbTotal, double p0) {
+    if(nbTotal == 0) return 0.0;
+    double phat = nbSucc/(double)nbTotal;
+    double z = (phat-p0)/std::sqrt(p0*(1-p0)/nbTotal);
+    return z;
+}
+
+// --- Régression linéaire simple Y = aX + b, ainsi que R² ---
+// a : pente, b : ordonnée à l'origine, r2 : coefficient de détermination.
+void StatInfer::regressionLineaire(const std::vector<double>& X, const std::vector<double>& Y, double& a, double& b, double& r2) {
+    double mx=0, my=0, sxy=0, sxx=0, syy=0;
+    int n = X.size(); if(n==0 || n!=Y.size()) {a=0; b=0; r2=0; return;}
+    for(int i=0;i<n;++i){mx+=X[i]; my+=Y[i];}
+    mx/=n; my/=n;
+    for(int i=0;i<n;++i){
+        sxy += (X[i]-mx)*(Y[i]-my);
+        sxx += (X[i]-mx)*(X[i]-mx);
+        syy += (Y[i]-my)*(Y[i]-my);
+    }
+    a = (sxx==0) ? 0.0 : sxy/sxx;
+    b = my - a*mx;
+    double r = (sxx==0||syy==0)?0 : sxy/std::sqrt(sxx*syy);
+    r2 = r*r;
+}
+
+// --- Corrélation de Pearson ---
+// Retourne 0 si tailles incompatibles ou si variance nulle.
+double StatInfer::pearson(const std::vector<double>& X, const std::vector<double>& Y) {
+    int n = X.size();
+    if(n==0 || n!=Y.size()) return 0.0;
+    double mx=0, my=0, sx=0, sy=0, num=0;
+    for(int i=0;i<n;++i){mx+=X[i];my+=Y[i];}
+    mx/=n; my/=n;
+    for(int i=0;i<n;++i){
+      sx+=(X[i]-mx)*(X[i]-mx);
+      sy+=(Y[i]-my)*(Y[i]-my);
+      num+=(X[i]-mx)*(Y[i]-my);
+    }
+    if (sx==0 || sy==0) return 0.0;
+    return num/std::sqrt(sx*sy);
+}
+
+
+// --- Représentation ASCII d'un nuage de points et de la droite de régression ---
+// Trace le nuage (o) et la droite (x) dans une grille width x height.
+void StatInfer::regressionAsciiPlot(const std::vector<double>& X, const std::vector<double>& Y, double a, double b, int width, int height) {
+    if(X.empty()||Y.empty()||X.size()!=Y.size())
+        return;
+
+    // Détermination des bornes du graphique
+    double xmin=*std::min_element(X.begin(),X.end());
+    double xmax=*std::max_element(X.begin(),X.end());
+    double ymin=*std::min_element(Y.begin(),Y.end());
+    double ymax=*std::max_element(Y.begin(),Y.end());
+
+    // Ajout d'une petite marge
+    double xbuf = (xmax-xmin)*0.05;
+    double ybuf = (ymax-ymin)*0.05;
+    xmin -= xbuf; xmax += xbuf; ymin -= ybuf; ymax += ybuf;
+
+    std::vector<std::string> grille(height+1, std::string(width+1, ' '));
+
+    // Tracé des points (o)
+    for(size_t i=0; i<X.size(); ++i) {
+        int xi = (int)((X[i]-xmin)/(xmax-xmin)*width);
+        int yi = height-(int)((Y[i]-ymin)/(ymax-ymin)*height); // inversion verticale
+        if(xi<0) xi=0; if(xi>width) xi=width;
+        if(yi<0) yi=0; if(yi>height) yi=height;
+        grille[yi][xi]='o';
+    }
+
+    // Tracé de la droite estimée y = a*x + b (x)
+    for(int x=0;x<=width;++x) {
+        double xval=xmin+(xmax-xmin)*x/width;
+        double yval=a*xval+b;
+        int yi = height-(int)((yval-ymin)/(ymax-ymin)*height);
+        if(yi>=0&&yi<=height)
+            if(grille[yi][x]!='o') grille[yi][x]='x';
+    }
+
+    // Affichage
+    for(int y=0; y<=height;++y) {
+        std::cout << grille[y] << "\n";
+    }
+    std::cout << "o: donnees, x: droite regression Y=aX+b\n";
+}
+
+main.cpp
+
+// Les fichiers .h de mes autres classes
+#include "SpotifyDataset.h"
+#include "StatDesc.h"
+#include "StatInfer.h"
+
+// Les bibliothèques necessaires à la lecture et sauvegarde de fichier + vector
+#include <iostream>
+#include <sstream>
+#include <fstream>
+#include <vector>
+
+// CODES COULEUR ANSI (vert rétro)
+#define COLOR_GREEN   "\033[1;32m"
+#define COLOR_RESET  "\033[0m"
+#define COLOR_BOLD   "\033[1m"
+
+// Garde en mémoire le dernier résultat affiché (pour la commande "save")
+std::string lastResult; // Pour la sauvegarde
+
+// ------------------------------------------------------------
+// Commandes "desc" : stats descriptives sur un attribut
+// Usage : desc [mean|median|mode|min|max|variance|stddev] [attribut]
+// ------------------------------------------------------------
+void handleDescCommand(const SpotifyDataset& dataset, const std::vector<std::string>& args, std::string& lastResult) {
+    if (args.size() != 3) {
+        lastResult = "Usage : desc [mean|median|mode|min|max|variance|stddev|amplitude] [attribut]\n";
+        std::cout << lastResult;
+        return;
+    }
+    std::ostringstream oss;
+    std::string stat = args[1];
+    std::string attr = args[2];
+
+    // Récupère toutes les valeurs de l'attribut voulu
+    std::vector<double> data = dataset.getAttribute(attr);
+    if (data.empty()) {
+        lastResult = "Attribut inconnu ou vide.\n";
+        std::cout << lastResult;
+        return;
+    }
+
+    // Applique la statistique demandée
+    if (stat == "mean") 
+        oss << "Moyenne de " << attr << ": " << StatDesc::mean(data) << '\n';
+    else if (stat == "median")
+        oss << "Mediane de " << attr << ": " << StatDesc::median(data) << '\n';
+    else if (stat == "mode") {
+        std::vector<double> modes = StatDesc::mode(data);
+        oss << "Mode(s) de " << attr << ": ";
+        for (double m : modes) oss << m << " ";
+        oss << '\n';
+    }
+    else if (stat == "min")
+        oss << "Minimum de " << attr << ": " << StatDesc::min(data) << '\n';
+    else if (stat == "max")
+        oss << "Maximum de " << attr << ": " << StatDesc::max(data) << '\n';
+    else if (stat == "amplitude")
+        oss << "Amplitude de " << attr << ": " << StatDesc::amplitude(data) << '\n';
+    else if (stat == "variance")
+        oss << "Variance de " << attr << ": " << StatDesc::variance(data) << '\n';
+    else if (stat == "stddev" || stat == "ecarttype")
+        oss << "Ecart-type de " << attr << ": " << StatDesc::stddev(data) << '\n';
+    else
+        oss << "Stat inconnue.\n";
+
+    lastResult = oss.str();
+    std::cout << lastResult;   
+}
+
+// ------------------------------------------------------------
+// Commandes "top" : classements
+//  - top N [attribut]
+//  - top gapleadfeature N
+// ------------------------------------------------------------
+void handleTopCommand(const SpotifyDataset& dataset, const std::vector<std::string>& args, std::string& lastResult) {
+    std::ostringstream oss;
+    if (!(args.size() == 3 || args.size() == 4)) {
+        oss << "Usage : top 10 [attribut]\n      ou top gapleadfeature 10\n";
+        lastResult = oss.str(); std::cout << lastResult; return;
+    }
+    // Cas "top gapleadfeature N"
+    if (args[1] == "gapleadfeature" && args.size() == 3) {
+        int n = std::stoi(args[2]);
+        auto top = StatDesc::topGapLeadFeature(dataset.getArtists(), n);
+        oss << "Top " << n << " ecart |asLead - asFeature|:\n";
+        int i = 1;
+        for (const auto& a : top)
+            oss << i++ << ". " << a.getName()
+                      << " (asLead=" << a.getAsLead()
+                      << ", asFeature=" << a.getAsFeature()
+                      << ", ecart=" << std::abs(a.getAsLead()-a.getAsFeature()) << ")\n";
+        lastResult = oss.str(); std::cout << lastResult; return;
+    }
+
+    // Cas "top N attribut"
+    int n = std::stoi(args[1]);
+    std::string attr = args[2];
+    auto top = StatDesc::topN(dataset.getArtists(), n, attr);
+    oss << "Top " << n << " artistes selon " << attr << " :\n";
+    int i = 1;
+    for (const auto& a : top){
+        oss << i++ << ". " << a.getName() << " (" << attr << " = ";
+        if      (attr == "streams")     oss << a.getStreams();
+        else if (attr == "daily")       oss << a.getDaily();
+        else if (attr == "solo")        oss << a.getSolo();
+        else if (attr == "aslead" || attr == "as_lead") oss << a.getAsLead();
+        else if (attr == "asfeature" || attr == "as_feature") oss << a.getAsFeature();
+        oss << ")\n";
+    }
+    lastResult = oss.str(); std::cout << lastResult;
+}
+
+// ------------------------------------------------------------
+// Affichage du ratio solo/feature par artiste
+// ------------------------------------------------------------
+void handleRepartitionCommand(const SpotifyDataset& dataset, const std::vector<std::string>& args, std::string& lastResult) {
+    if(args.size() != 1) {
+        std::cout << "Usage : repartition\n";
+        return;
+    }
+    // Affiche directement sur la sortie standard (ne met pas à jour lastResult)
+    StatDesc::printSoloFeatureRatio(dataset.getArtists());
+}
+
+// ------------------------------------------------------------
+// Affichage de la répartition globale solo/feature
+// ------------------------------------------------------------
+void handleGlobalRepartitionCommand(const SpotifyDataset& dataset, const std::vector<std::string>& args, std::string& lastResult) {
+    if(args.size() != 2 || args[1] != "global") {
+        std::cout << "Usage : repartition global\n";
+        return;
+    }
+    // Affiche directement (ne met pas à jour lastResult)
+    StatDesc::printGlobalSoloFeatureRatio(dataset.getArtists());
+}
+
+// ------------------------------------------------------------
+// IC sur la moyenne d'un attribut (95%)
+// ------------------------------------------------------------
+void handleICMeanCommand(const SpotifyDataset& dataset, const std::vector<std::string>& args, std::string& lastResult) {
+    if (args.size() != 3) {
+        std::cout << "Usage : ic mean [attribut]\n";
+        return;
+    }
+    auto data = dataset.getAttribute(args[2]);
+    double demiLargeur = StatInfer::intervalleConfianceMoyenne(data); // 95% => z=1,96
+    double moyenne = StatDesc::mean(data);
+    std::ostringstream oss;
+    oss << "IC 95% pour la moyenne de " << args[2] << " : [" 
+        << (moyenne-demiLargeur) << " ; " << (moyenne+demiLargeur) << "]\n";
+    lastResult = oss.str();
+    std::cout << lastResult;
+}
+
+// ------------------------------------------------------------
+// IC sur une proportion (95%), pour "x > seuil"
+// ------------------------------------------------------------
+void handleICPropCommand(const SpotifyDataset& dataset, const std::vector<std::string>& args, std::string& lastResult) {
+    if (args.size() != 4) {
+        std::cout << "Usage : ic prop [attribut] [seuil]\n";
+        return;
+    }
+    double seuil = std::stod(args[3]);
+    auto data = dataset.getAttribute(args[2]);
+    int nb = 0;
+    for(auto x : data) if(x > seuil) nb++;
+    int n = data.size();
+    double demiLargeur = StatInfer::intervalleConfianceProportion(nb, n);
+    double prop = n==0 ? 0 : (nb/(double)n);
+    std::ostringstream oss;
+    oss << "IC 95% pour la proportion d'artistes avec " << args[2] << " > " << seuil << " : ["
+        << (prop - demiLargeur) << " ; " << (prop + demiLargeur) << "]\n";
+    lastResult = oss.str();
+    std::cout << lastResult;
+}
+
+// ------------------------------------------------------------
+// Test de proportion (z-test) : H0: p = p0
+// ------------------------------------------------------------
+void handleTestPropCommand(const SpotifyDataset& dataset, const std::vector<std::string>& args, std::string& lastResult) {
+    if (args.size() != 5) {
+        std::cout << "Usage : test testprop [attribut] [seuil] [proportion_attendue]\n";
+        return;
+    }
+    std::string attr = args[2];
+    double seuil = std::stod(args[3]);
+    double p0 = std::stod(args[4]);
+    auto data = dataset.getAttribute(attr);
+    int nb = 0;
+    for(auto x : data) if(x > seuil) nb++;
+    int n = data.size();
+    double z = StatInfer::testProportion(nb, n, p0);
+
+    std::ostringstream oss;
+    oss << "Test de proportion (H0: p = " << p0 << ") :\n";
+    oss << "z = " << z << " (>1.96 ou <-1.96 = significatif à 5%)\n";
+    lastResult = oss.str();
+    std::cout << lastResult;
+}
+
+// ------------------------------------------------------------
+// Outils de découpage de commande / sauvegarde
+// ------------------------------------------------------------
+std::vector<std::string> split(const std::string& s) {
+    std::vector<std::string> out;
+    std::istringstream iss(s);
+    std::string tok;
+    while (iss >> tok) out.push_back(tok);
+    return out;
+}
+
+void saveToFile(const std::string& filename, const std::string& content) {
+    std::ofstream out(filename);
+    if (!out) { std::cout << "Erreur d'ouverture du fichier : " << filename << "\n"; return; }
+    out << content;
+    out.close();
+    std::cout << "Résultat(s) sauvegardé(s) dans " << filename << "\n";
+}
+
+// ------------------------------------------------------------
+// Menu (affichage console)
+// ------------------------------------------------------------
+void showMenu() {
+    std::cout << COLOR_GREEN;
+    std::cout << "\n";
+    std::cout << "========================================\n";
+    std::cout << "    ANALYSE SPOTIFY - DATA MINING C++   \n";
+    std::cout << "========================================\n";
+    std::cout << "Commandes disponibles :\n";
+    std::cout << " " << COLOR_BOLD << "desc [stat] [attribut]" << COLOR_RESET << COLOR_GREEN << "      (ex: desc mean streams; stats: mean/median/mode/min/max/variance/stddev/amplitude)\n";
+    std::cout << " " << COLOR_BOLD << "top N [attribut]" << COLOR_RESET << COLOR_GREEN << "            (ex: top 10 streams)\n";
+    std::cout << " " << COLOR_BOLD << "top gapleadfeature N" << COLOR_RESET << COLOR_GREEN << "   (plus grand ecart lead/feature)\n";
+    std::cout << " " << COLOR_BOLD << "repartition" << COLOR_RESET << COLOR_GREEN << "                (ratio solo/feature par artiste)\n";
+    std::cout << " " << COLOR_BOLD << "repartition global" << COLOR_RESET << COLOR_GREEN << "         (ratio global)\n";
+    std::cout << " " << COLOR_BOLD << "proba top N [attr]" << COLOR_RESET << COLOR_GREEN << "        (ex: proba top 10 streams, modele uniforme: n/N)\n";
+    std::cout << " " << COLOR_BOLD << "proba solo70" << COLOR_RESET << COLOR_GREEN << "               (proba >70% solo)\n";
+    std::cout << " " << COLOR_BOLD << "proba condtop10daily seuil" << COLOR_RESET << COLOR_GREEN << "\n";
+    std::cout << " " << COLOR_BOLD << "regression X Y [plot]" << COLOR_RESET << COLOR_GREEN << "             (ex: regression streams solo)\n";
+    std::cout << " " << COLOR_BOLD << "correlation X Y" << COLOR_RESET << COLOR_GREEN << "           (ex: correlation solo asfeature)\n";
+    std::cout << " " << COLOR_BOLD << "ic mean [attribut]" << COLOR_RESET << COLOR_GREEN << "             (IC sur la moyenne)\n";
+    std::cout << " " << COLOR_BOLD << "ic prop [attribut] [seuil]" << COLOR_RESET << COLOR_GREEN << "    (IC sur une proportion)\n";
+    std::cout << " " << COLOR_BOLD << "test testprop [attribut] [seuil] [prop]" << COLOR_RESET << COLOR_GREEN << "  (z-test de proportion)\n";
+    std::cout << " " << COLOR_BOLD << "test ttestsolofeature" << COLOR_RESET << COLOR_GREEN << "      (test de moyenne)\n";
+    std::cout << " " << COLOR_BOLD << "save" << COLOR_RESET << COLOR_GREEN << "                           (sauvegarder dernier affichage)\n";
+    std::cout << " " << COLOR_BOLD << "exit | quit" << COLOR_RESET << COLOR_GREEN << "                  (quitter)\n";
+    std::cout << "----------------------------------------" << COLOR_RESET << "\n";
+}
+
+// ------------------------------------------------------------
+// Point d'entrée
+// ------------------------------------------------------------
+int main() {
+    SpotifyDataset data;
+
+    // Ouvrir un fichier de log et rediriger std::cerr
+    std::ofstream logStream("logs", std::ios::out | std::ios::trunc);
+    std::streambuf* oldCerrBuf = nullptr;
+    if (logStream) {
+    oldCerrBuf = std::cerr.rdbuf(logStream.rdbuf());
+    } else {
+    std::cerr << "Impossible d'ouvrir le fichier de logs.\n";
+    }
+
+    // Chargement du CSV (les messages d'import iront dans 'logs')
+    if (!data.loadFromCSV("artists.csv")) {
+    std::cerr << "Erreur lors de l'ouverture du CSV\n";
+    // Note: ce message ira aussi dans 'logs' tant que la redirection est active
+    }
+
+    // Restaurer std::cerr si vous souhaitez afficher les messages suivants à la console
+    if (oldCerrBuf) {
+    std::cerr.rdbuf(oldCerrBuf);
+    logStream.close();
+    }
+
+    std::string command;
+    while (true) {
+        showMenu();
+        std::cout << "\nCommande (ou 'exit' pour quitter) : ";
+        std::getline(std::cin, command);
+
+        if (command == "exit" || command == "quit") {
+            break;
+        }
+        auto tokens = split(command);
+
+        if (tokens.empty()) continue;
+
+        // --- Commande "desc" ---
+        if (tokens[0] == "desc") {
+            handleDescCommand(data, tokens, lastResult);
+        }
+        // --- Commande "top" ---
+        else if(tokens[0]=="top") handleTopCommand(data, tokens, lastResult);
+        // --- "repartition global" ---
+        else if(tokens[0]=="repartition" && tokens.size()>1 && tokens[1]=="global")
+        handleGlobalRepartitionCommand(data, tokens, lastResult);
+        // --- "repartition" ---
+        else if(tokens[0]=="repartition")
+        handleRepartitionCommand(data, tokens, lastResult);
+        // --- "proba top N attr" ---
+        else if (tokens[0] == "proba" && tokens.size() == 4 && tokens[1] == "top") {
+            int n = std::stoi(tokens[2]);
+            double proba = StatInfer::probaTopN(data.getArtists(), n, tokens[3]);
+            std::ostringstream oss;
+            oss << "Proba d'etre dans le top " << n << " de " << tokens[3]
+            << " (modele uniforme n/N): " << proba << "\n"; 
+            lastResult = oss.str();
+            std::cout << lastResult;
+        } 
+        // --- "proba solo70" ---
+        else if (tokens[0] == "proba" && tokens[1] == "solo70") {
+            double proba = StatInfer::probaParSoloRatio(data.getArtists(), 0.70);
+            std::ostringstream oss;
+            oss << "Proba qu'un artiste ait >70% de streams solo: " << proba << "\n";
+            lastResult = oss.str();
+            std::cout << lastResult;
+        }
+        // --- "proba condtop10daily seuil" ---
+        else if (tokens[0] == "proba" && tokens[1] == "condtop10daily" && tokens.size() == 3) {
+            double seuil = std::stod(tokens[2]);
+            double proba = StatInfer::probaCondTopNdaily_given_highStreams(data.getArtists(), seuil, 10);
+            std::ostringstream oss;
+            oss << "Proba(d'etre dans le top10 daily GLOBAL | streams > " << seuil << ") = " << proba << "\n";
+            lastResult = oss.str();
+            std::cout << lastResult;
+        } 
+        // --- "regression X Y" (première occurrence) ---
+        else if (tokens[0] == "regression" && (tokens.size() == 3 || tokens.size() == 4)) {
+            auto x = data.getAttribute(tokens[1]);
+            auto y = data.getAttribute(tokens[2]);
+            double a, b, r2;
+            StatInfer::regressionLineaire(x, y, a, b, r2);
+            // Résidus
+            std::vector<double> resid;
+            resid.reserve(x.size());
+            for (size_t i = 0; i < x.size() && i < y.size(); ++i)
+                resid.push_back(y[i] - (a * x[i] + b));
+
+            double rmean = StatDesc::mean(resid);
+            double rstd  = StatDesc::stddev(resid);
+            double rmin  = resid.empty() ? 0.0 : *std::min(resid.begin(), resid.end());
+            double rmax  = resid.empty() ? 0.0 : *std::max(resid.begin(), resid.end());
+
+            std::ostringstream oss;
+            oss << "Regression " << tokens[1] << " -> " << tokens[2] << "\n"
+                << "Y = " << a << " * X + " << b << " ; R^2 = " << r2 << "\n"
+                << "Residuals: mean=" << rmean << ", std=" << rstd
+                << ", min=" << rmin << ", max=" << rmax << "\n";
+            if (tokens.size() == 4 && tokens[3] == "plot") {
+                oss << "(Graphe ASCII affiche)\n";
+            }
+            lastResult = oss.str();
+            std::cout << lastResult;
+
+            if (tokens.size() == 4 && tokens[3] == "plot") {
+                StatInfer::regressionAsciiPlot(x, y, a, b); // trace sur stdout
+            }
+        }
+        // --- "correlation X Y" ---
+        else if (tokens[0] == "correlation" && tokens.size() == 3) {
+        auto x = data.getAttribute(tokens[1]);
+        auto y = data.getAttribute(tokens[2]);
+        double corr = StatInfer::pearson(x, y);
+        std::ostringstream oss;
+        oss << "Correlation de Pearson entre " << tokens[1] << " et " << tokens[2] << " : " << corr << "\n";
+        lastResult = oss.str();
+        std::cout << lastResult;
+        }
+        // --- "test ttestsolofeature" ---
+        else if (tokens[0] == "test" && tokens[1] == "ttestsolofeature") {
+        auto solo = data.getAttribute("solo");
+        auto feat = data.getAttribute("asfeature");
+        double tstat = StatInfer::ttest2moyennes(solo, feat);
+        std::ostringstream oss;
+        oss << "T-statistique pour comparaison des moyennes (solo vs feature) : " << tstat
+        << " (|t| >= ~2 => significatif a 5% environ)\n";
+        lastResult = oss.str();
+        std::cout << lastResult;
+        }
+        // --- "ic mean attr" ---
+        else if (tokens[0] == "ic" && tokens[1] == "mean")
+            handleICMeanCommand(data, tokens, lastResult);
+
+        // --- "ic prop attr seuil" ---
+        else if (tokens[0] == "ic" && tokens[1] == "prop")
+            handleICPropCommand(data, tokens, lastResult);
+
+        // --- "test testprop attr seuil p0" ---
+        else if (tokens[0] == "test" && tokens[1] == "testprop")
+            handleTestPropCommand(data, tokens, lastResult);
+
+        // --- "save" : sauvegarde lastResult dans un fichier ---
+        else if (tokens[0]=="save") {
+        std::cout << "Nom du fichier de sortie ? ";
+        std::string filename; std::getline(std::cin, filename);
+        // Attention : "lastResult" est vide pour plusieurs commandes (cf. commentaires ci-dessus).
+        saveToFile(filename, lastResult);
+        }
+        else {
+            std::cout << "Commande inconnue.\n";
+        }
+    }
+    return 0;
+}
+
+extrait de artists.csv
+
+Future,"31,001.7",20.513,"15,374.1","7,299.6","15,627.6"
+Nicki Minaj,"30,759.8",16.361,"10,631.1","6,013.9","20,128.7"
+Kendrick Lamar,"29,836.5",16.652,"20,052.2","12,208.1","9,784.3"
+Billie Eilish,"29,173.3",19.313,"29,173.3","25,240.5",
+XXXTENTACION,"28,370.7",11.181,"24,681.3","20,244.5","3,689.4"
+Chris Brown,"28,314.1",12.788,"14,904.7","7,064.1","13,409.3"
+Imagine Dragons,"28,100.5",16.133,"26,430.9","22,543.8","1,669.6"
+Khalid,"27,776.0",8.833,"14,779.4","9,759.3","12,996.6"
+Coldplay,"27,526.1",14.860,"25,154.3","22,329.9","2,371.8"
+Bruno Mars,"27,465.0",19.063,"20,901.5","17,207.5","6,563.5"
+Dua Lipa,"27,235.7",15.613,"17,797.4","14,127.9","9,438.3"
+Daddy Yankee,"27,177.1",13.461,"12,446.0","6,377.9","14,731.1"
+Lil Wayne,"26,657.9",11.466,"10,013.0","2,787.0","16,644.9"
+David Guetta,"25,236.3",15.439,"18,511.0",900.8,"6,725.3"
+Lil Baby,"23,666.8",14.129,"11,599.2","5,314.6","12,067.6"
+Anuel AA,"23,660.2",14.711,"10,770.8","3,227.4","12,889.4"
+Maroon 5,"23,404.5",10.845,"23,209.5","14,873.4",195.0
+21 Savage,"23,084.0",22.288,"9,157.9","4,814.1","13,926.1"
+Lil Uzi Vert,"22,742.5",12.372,"14,655.8","11,782.9","8,086.6"
