@@ -7,11 +7,10 @@
 /*
   StatInfer : fonctions d'inférence/statistiques (probabilités simples,
   intervalles de confiance, tests, régression, corrélation).
-  Remarque : les implémentations sont volontairement simples/approximatives.
 */
 class StatInfer {
 public:
-    // PROBABILITÉS (approches simplifiées)
+    // PROBABILITÉS 
     static double probaTopN(const std::vector<Artist>&, int n, const std::string& attr);
     static double probaParSoloRatio(const std::vector<Artist>&, double seuilRatio);
     static double probaCondTopNdaily_given_highStreams(const std::vector<Artist>&, double seuilStreams, int n);

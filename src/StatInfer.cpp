@@ -24,7 +24,7 @@ double StatInfer::probaParSoloRatio(const std::vector<Artist>& artists, double s
 }
 
 // --- Proba conditionnelle : être top N en daily parmi les artistes dont streams > seuilStreams ---
-// Logique : on filtre les artistes (streams > seuil), on trie ce sous-ensemble par daily,
+// On filtre les artistes (streams > seuil), on trie ce sous-ensemble par daily,
 // puis on renvoie n / (taille du sous-ensemble).
 double StatInfer::probaCondTopNdaily_given_highStreams(const std::vector<Artist>& artists, double seuilStreams, int n) {
 if (artists.empty()) return 0.0;

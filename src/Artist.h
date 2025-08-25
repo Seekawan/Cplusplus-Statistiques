@@ -7,7 +7,7 @@
   Champs (tous en double pour rester cohérent avec les valeurs décimales du CSV) :
     - name       : nom de l'artiste
     - streams    : total de streams
-    - daily      : moyenne/score journalier (interprétation selon la source)
+    - daily      : score journalier
     - asLead     : streams en tant qu'artiste principal (lead)
     - solo       : streams en solo
     - asFeature  : streams en tant qu'artiste invité (feature)

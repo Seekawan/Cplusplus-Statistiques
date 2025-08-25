@@ -73,12 +73,12 @@ SpotifyDataset::ColMap SpotifyDataset::buildColumnMap(const std::vector<std::str
     return map;
 }
 
-// ----------- Parsing numérique robuste -----------
+// ----------- Parsing numérique-----------
 
 double SpotifyDataset::parseNumber(const std::string& s, int linenumber) const {
     std::string sanitized = trim(s);
 
-    // Valeur vide -> on retourne 0.0 (choix: ignorer la ligne si vous préférez)
+    // Valeur vide -> on retourne 0.0 
     if (sanitized.empty()) return 0.0;
 
     // Retirer les espaces internes typiques de groupement "60 000"

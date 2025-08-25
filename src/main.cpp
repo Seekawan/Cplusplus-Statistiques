@@ -118,7 +118,7 @@ void handleRepartitionCommand(const SpotifyDataset& dataset, const std::vector<s
         std::cout << "Usage : repartition\n";
         return;
     }
-    // Affiche directement sur la sortie standard (ne met pas à jour lastResult)
+    // Affiche directement sur la sortie standard
     StatDesc::printSoloFeatureRatio(dataset.getArtists());
 }
 
@@ -130,7 +130,7 @@ void handleGlobalRepartitionCommand(const SpotifyDataset& dataset, const std::ve
         std::cout << "Usage : repartition global\n";
         return;
     }
-    // Affiche directement (ne met pas à jour lastResult)
+    // Affiche directement
     StatDesc::printGlobalSoloFeatureRatio(dataset.getArtists());
 }
 

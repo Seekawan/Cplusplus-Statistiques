@@ -1,10 +1,10 @@
 #include "Artist.h"
 
-// Constructeur : simple affectation des membres via liste d'initialisation
+// Constructeur : affectation des membres via liste d'initialisation
 Artist::Artist(const std::string& name, double streams, double daily, double asLead, double solo, double asFeature)
     : name(name), streams(streams), daily(daily), asLead(asLead), solo(solo), asFeature(asFeature) {}
 
-// Getters : renvoient les valeurs stockées, sans copie inutile
+// Getters : renvoient les valeurs stockées
 const std::string& Artist::getName() const {
     return name;
 }
